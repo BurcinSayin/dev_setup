@@ -33,16 +33,11 @@ $machine_packages = @(
     "Mozilla.Firefox.DeveloperEdition"
     "Schniz.fnm"
     "mRemoteNG.mRemoteNG"
-)
-
-$packages = @(
-    "Postman.Postman"               # API testing
-    "JetBrains.Toolbox"
-    "Google.AntigravityIDE"
     "pCloudAG.pCloudDrive"
 )
 
 $user_packages = @(
+    "Postman.Postman"               # API testing
     "9NK4T08DHQ80"               # Dropbox
     "JetBrains.Toolbox"
     "Google.AntigravityIDE"
@@ -64,25 +59,13 @@ if ($runInstall) {
             winget install --id $id --scope user --accept-package-agreements --accept-source-agreements
         }
     }
-
-    foreach ($id in $packages) {
-        if ($id -and $id.Trim() -ne "") {
-            Write-Host "Installing $id (User scope)..." -ForegroundColor Cyan
-            winget install --id $id --accept-package-agreements --accept-source-agreements
-        }
-    }
 }
 else {
     Write-Host "==========================================================================" -ForegroundColor Cyan
     Write-Host "                      Package Installation Status                         " -ForegroundColor Cyan
     Write-Host "==========================================================================" -ForegroundColor Cyan
-    Write-Host "Scanning system packages with winget (this may take a few seconds)..." -ForegroundColor DarkGray
-    
-    # Fetch winget outputs once
-    $machineOutput = winget list --scope machine 2>$null | Out-String
-    $userOutput = winget list --scope user 2>$null | Out-String
-    
-    Write-Host "Scan complete!`n" -ForegroundColor Green
+    Write-Host "Scanning system packages with winget (this might take a minute)..." -ForegroundColor DarkGray
+    Write-Host ""
     
     # Combine all packages uniquely
     $all_packages = ($machine_packages + $user_packages + $packages) | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique
@@ -92,9 +75,13 @@ else {
     Write-Host ("{0,-40} {1,-18} {2,-15}" -f "----------", "---------------", "------") -ForegroundColor DarkGray
     
     foreach ($id in $all_packages) {
-        $idEscaped = [regex]::Escape($id)
-        $isMachine = $machineOutput -match "\b$idEscaped\b"
-        $isUser = $userOutput -match "\b$idEscaped\b"
+        # Test Machine scope (Silently drop stdout/stderr)
+        winget list --id $id --exact --scope machine *> $null
+        $isMachine = ($LASTEXITCODE -eq 0)
+
+        # Test User scope (Silently drop stdout/stderr)
+        winget list --id $id --exact --scope user *> $null
+        $isUser = ($LASTEXITCODE -eq 0)
         
         # Determine actual scope
         if ($isMachine -and $isUser) {
