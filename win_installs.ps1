@@ -34,6 +34,7 @@ $machine_packages = @(
     "Schniz.fnm"
     "mRemoteNG.mRemoteNG"
     "pCloudAG.pCloudDrive"
+    "SumatraPDF.SumatraPDF"
 )
 
 $user_packages = @(
