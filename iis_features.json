@@ -1,0 +1,16 @@
+[
+  "IIS-WebServerRole",
+  "IIS-WebServer",
+  "IIS-CommonHttpFeatures",
+  "IIS-StaticContent",
+  "IIS-DefaultDocument",
+  "IIS-HttpErrors",
+  "IIS-HttpRedirect",
+  "IIS-ApplicationDevelopment",
+  "IIS-ASPNET45",
+  "IIS-NetFxExtensibility45",
+  "IIS-ISAPIExtensions",
+  "IIS-ISAPIFilter",
+  "IIS-Security",
+  "IIS-RequestFiltering"
+]

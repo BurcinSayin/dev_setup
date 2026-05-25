@@ -4,29 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-Single-script Windows dev-environment bootstrapper. `win_installs.ps1` declares two lists of `winget` package IDs and either reports their install status or installs them.
+Windows 11 dev-environment bootstrappers. Two sibling scripts, both JSON-driven and following the same self-elevate / status-by-default / `--install` convention:
+
+- `win_installs.ps1` — installs winget packages declared in `machine_apps.json` and `user_apps.json`.
+- `enable_iis.ps1` — enables the IIS optional features in `iis_features.json` for hosting ASP.NET 4.8 apps, and installs the URL Rewrite IIS module via winget.
 
 ## Commands
 
-- Show install status of all declared packages (default, no install):
-  `.\win_installs.ps1`
-- Install everything:
-  `.\win_installs.ps1 --install` (or `-Install`)
+- Show status (default, no changes):
+  `.\win_installs.ps1` / `.\enable_iis.ps1`
+- Apply changes:
+  `.\win_installs.ps1 --install` / `.\enable_iis.ps1 --install` (each also accepts `-Install`)
 
-Both invocations self-elevate via `Start-Process -Verb RunAs` if not already running as Administrator, so they must be launched from an interactive PowerShell session (the UAC prompt will appear).
+Both scripts self-elevate via `Start-Process -Verb RunAs` if not already Administrator, so they must be launched from an interactive PowerShell session (UAC prompt appears).
 
 ## Architecture
 
-Two JSON files in the same directory as the script drive everything — flat arrays of `winget` IDs:
+JSON files in the same directory as the scripts drive everything — flat arrays of identifiers, loaded via `$PSScriptRoot` so the script must live alongside its JSON:
 
-- `machine_apps.json` — installed with `--scope machine` (system-wide, requires admin).
-- `user_apps.json` — installed with `--scope user` (per-user profile). Some IDs here are Microsoft Store IDs (e.g. `9NK4T08DHQ80` for Dropbox) rather than winget package names.
+- `machine_apps.json` — winget IDs installed with `--scope machine` (system-wide).
+- `user_apps.json` — winget IDs installed with `--scope user`. Some IDs are Microsoft Store IDs (e.g. `9NK4T08DHQ80` for Dropbox) rather than winget package names.
+- `iis_features.json` — DISM feature names enabled via `Enable-WindowsOptionalFeature`. `IIS-ASPNET45` covers ASP.NET 4.5 through 4.8.
 
-`win_installs.ps1` loads both via `Read-PackageList` (which exits with a clear error if a file is missing or malformed) and resolves them with `$PSScriptRoot`, so the script must live alongside its JSON.
+`win_installs.ps1` loads its lists via `Read-PackageList`; `enable_iis.ps1` uses an identically-shaped `Read-FeatureList`. Both exit with a clear error if a file is missing or malformed.
 
-A package can legitimately appear in both lists when it ships separate machine and user installers (e.g. Postman). The status report probes each scope independently with `winget list --exact --scope <machine|user>` and reports `Machine`, `User`, `Machine & User`, or `Missing`.
+A winget package can legitimately appear in both `machine_apps.json` and `user_apps.json` when it ships separate installers (e.g. Postman). `win_installs.ps1`'s status report probes each scope independently in parallel via `Start-ThreadJob` (with a `Start-Job` fallback if the `ThreadJob` module is missing) and reports `Machine`, `User`, `Machine & User`, or `Missing`. `enable_iis.ps1`'s status report uses `Get-WindowsOptionalFeature` per feature and probes `%windir%\System32\inetsrv\rewrite_schema.xml` to detect URL Rewrite.
 
-## When adding packages
+After `enable_iis.ps1 --install`, a full reboot is typically required before IIS is operational — `iisreset` is not sufficient for DISM features that report `RestartNeeded`. The script prints a yellow warning in that case.
 
-- Edit the JSON files, not the script. Look up the exact winget ID with `winget search <name>` first — IDs are case-sensitive on some sources and a wrong ID silently fails the install loop without aborting.
-- Put it in `machine_apps.json` unless the package only supports per-user install or is a Store ID.
+## When adding packages or features
+
+- Edit the JSON files, not the scripts. Look up exact winget IDs with `winget search <name>` first — IDs are case-sensitive on some sources and a wrong ID silently fails the install loop without aborting.
+- Put winget IDs in `machine_apps.json` unless the package only supports per-user install or is a Store ID.
+- Look up DISM feature names with `Get-WindowsOptionalFeature -Online | Where-Object FeatureName -like 'IIS-*'` before adding to `iis_features.json`.
