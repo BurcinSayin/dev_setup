@@ -35,6 +35,7 @@ $machine_packages = @(
     "mRemoteNG.mRemoteNG"
     "pCloudAG.pCloudDrive"
     "SumatraPDF.SumatraPDF"
+    "Anthropic.ClaudeCode"
 )
 
 $user_packages = @(
@@ -42,6 +43,7 @@ $user_packages = @(
     "9NK4T08DHQ80"               # Dropbox
     "JetBrains.Toolbox"
     "Google.AntigravityIDE"
+    "Anthropic.Claude"
 )
 
 if ($runInstall) {
