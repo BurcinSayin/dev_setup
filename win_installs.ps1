@@ -57,29 +57,74 @@ if ($runInstall) {
     }
 }
 else {
+    $all_packages = ($machine_packages + $user_packages) | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique
+    $throttle = 8
+
+    $useThreadJob = [bool](Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+    if (-not $useThreadJob) {
+        try {
+            Install-Module -Name ThreadJob -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+            Import-Module ThreadJob -ErrorAction Stop
+            $useThreadJob = [bool](Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+        }
+        catch {
+            $useThreadJob = $false
+        }
+    }
+
     Write-Host "==========================================================================" -ForegroundColor Cyan
     Write-Host "                      Package Installation Status                         " -ForegroundColor Cyan
     Write-Host "==========================================================================" -ForegroundColor Cyan
-    Write-Host "Scanning system packages with winget (this might take a minute)..." -ForegroundColor DarkGray
+    $checkCount = $all_packages.Count * 2
+    Write-Host ("Scanning system packages with winget (running {0} checks, up to {1} in parallel)..." -f $checkCount, $throttle) -ForegroundColor DarkGray
+    if (-not $useThreadJob) {
+        Write-Host "ThreadJob module unavailable; falling back to Start-Job (slower startup)." -ForegroundColor Yellow
+    }
     Write-Host ""
-    
-    # Combine all packages uniquely
-    $all_packages = ($machine_packages + $user_packages) | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique
-    
-    # Print header
+
+    $work = foreach ($id in $all_packages) {
+        [pscustomobject]@{ Id = $id; Scope = 'machine' }
+        [pscustomobject]@{ Id = $id; Scope = 'user' }
+    }
+
+    $jobScript = {
+        param($id, $scope)
+        winget list --id $id --exact --scope $scope *> $null
+        [pscustomobject]@{ Id = $id; Scope = $scope; Found = ($LASTEXITCODE -eq 0) }
+    }
+
+    $jobs = New-Object System.Collections.Generic.List[object]
+    foreach ($item in $work) {
+        while (@(Get-Job -State Running).Count -ge $throttle) {
+            Start-Sleep -Milliseconds 50
+        }
+        if ($useThreadJob) {
+            $job = Start-ThreadJob -ScriptBlock $jobScript -ArgumentList $item.Id, $item.Scope
+        }
+        else {
+            $job = Start-Job -ScriptBlock $jobScript -ArgumentList $item.Id, $item.Scope
+        }
+        $jobs.Add($job)
+    }
+
+    $results = $jobs | Wait-Job | Receive-Job
+    $jobs | Remove-Job -Force
+
+    $installedMachine = @{}
+    $installedUser = @{}
+    foreach ($r in $results) {
+        if (-not $r.Found) { continue }
+        if ($r.Scope -eq 'machine') { $installedMachine[$r.Id] = $true }
+        elseif ($r.Scope -eq 'user') { $installedUser[$r.Id] = $true }
+    }
+
     Write-Host ("{0,-40} {1,-18} {2,-15}" -f "Package ID", "Installed Scope", "Status") -ForegroundColor White
     Write-Host ("{0,-40} {1,-18} {2,-15}" -f "----------", "---------------", "------") -ForegroundColor DarkGray
-    
-    foreach ($id in $all_packages) {
-        # Test Machine scope (Silently drop stdout/stderr)
-        winget list --id $id --exact --scope machine *> $null
-        $isMachine = ($LASTEXITCODE -eq 0)
 
-        # Test User scope (Silently drop stdout/stderr)
-        winget list --id $id --exact --scope user *> $null
-        $isUser = ($LASTEXITCODE -eq 0)
-        
-        # Determine actual scope
+    foreach ($id in $all_packages) {
+        $isMachine = $installedMachine.ContainsKey($id)
+        $isUser = $installedUser.ContainsKey($id)
+
         if ($isMachine -and $isUser) {
             $actualScope = "Machine & User"
             $status = "Installed"
@@ -100,7 +145,7 @@ else {
             $status = "Missing"
             $statusColor = "Yellow"
         }
-        
+
         Write-Host ("{0,-40} " -f $id) -NoNewline
         Write-Host ("{0,-18} " -f $actualScope) -NoNewline
         Write-Host ("[{0}]" -f $status) -ForegroundColor $statusColor
