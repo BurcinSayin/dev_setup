@@ -20,31 +20,24 @@ if (-not $isAdmin) {
 
 $runInstall = $Install.IsPresent -or ($args -contains '--install') -or ($args -contains '-Install')
 
-$machine_packages = @(
-    "Git.Git"                       # Version control
-    "GitHub.cli"                    # gh CLI
-    "7zip.7zip"                     # Archiver
-    "curl.curl"                     # HTTP client
-    "JernejSimoncic.Wget"           # wget
-    "jqlang.jq"                     # JSON processor
-    "Postman.Postman"               # API testing
-    "Amazon.AWSCLI"                 # aws CLI
-    "Notepad++.Notepad++"
-    "Mozilla.Firefox.DeveloperEdition"
-    "Schniz.fnm"
-    "mRemoteNG.mRemoteNG"
-    "pCloudAG.pCloudDrive"
-    "SumatraPDF.SumatraPDF"
-    "Anthropic.ClaudeCode"
-)
+function Read-PackageList {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Host "Package list not found: $Path" -ForegroundColor Red
+        exit 1
+    }
+    try {
+        $items = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "Failed to parse JSON in ${Path}: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+    return @($items | Where-Object { $_ -and $_.Trim() -ne "" })
+}
 
-$user_packages = @(
-    "Postman.Postman"               # API testing
-    "9NK4T08DHQ80"               # Dropbox
-    "JetBrains.Toolbox"
-    "Google.AntigravityIDE"
-    "Anthropic.Claude"
-)
+$machine_packages = Read-PackageList -Path (Join-Path $PSScriptRoot 'machine_apps.json')
+$user_packages    = Read-PackageList -Path (Join-Path $PSScriptRoot 'user_apps.json')
 
 if ($runInstall) {
     Write-Host "Starting installations..." -ForegroundColor Green
@@ -71,7 +64,7 @@ else {
     Write-Host ""
     
     # Combine all packages uniquely
-    $all_packages = ($machine_packages + $user_packages + $packages) | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique
+    $all_packages = ($machine_packages + $user_packages) | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Unique
     
     # Print header
     Write-Host ("{0,-40} {1,-18} {2,-15}" -f "Package ID", "Installed Scope", "Status") -ForegroundColor White

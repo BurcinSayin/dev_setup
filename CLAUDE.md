@@ -17,18 +17,16 @@ Both invocations self-elevate via `Start-Process -Verb RunAs` if not already run
 
 ## Architecture
 
-Two package lists drive everything:
+Two JSON files in the same directory as the script drive everything — flat arrays of `winget` IDs:
 
-- `$machine_packages` (win_installs.ps1:23) — installed with `--scope machine` (system-wide, requires admin).
-- `$user_packages` (win_installs.ps1:41) — installed with `--scope user` (per-user profile). Some IDs here are Microsoft Store IDs (e.g. `9NK4T08DHQ80` for Dropbox) rather than winget package names.
+- `machine_apps.json` — installed with `--scope machine` (system-wide, requires admin).
+- `user_apps.json` — installed with `--scope user` (per-user profile). Some IDs here are Microsoft Store IDs (e.g. `9NK4T08DHQ80` for Dropbox) rather than winget package names.
 
-A package can legitimately appear in both lists when it ships separate machine and user installers (e.g. Postman). The status report (win_installs.ps1:80) probes each scope independently with `winget list --exact --scope <machine|user>` and reports `Machine`, `User`, `Machine & User`, or `Missing`.
+`win_installs.ps1` loads both via `Read-PackageList` (which exits with a clear error if a file is missing or malformed) and resolves them with `$PSScriptRoot`, so the script must live alongside its JSON.
 
-## Known issue
-
-Line 74 references `$packages`, which is never defined. The `$all_packages` union still works because PowerShell treats undefined variables as `$null` and the `Where-Object` filter drops it, but the reference is dead and should either be removed or replaced with a real third list.
+A package can legitimately appear in both lists when it ships separate machine and user installers (e.g. Postman). The status report probes each scope independently with `winget list --exact --scope <machine|user>` and reports `Machine`, `User`, `Machine & User`, or `Missing`.
 
 ## When adding packages
 
-- Look up the exact winget ID with `winget search <name>` before adding — IDs are case-sensitive on some sources and a wrong ID silently fails the install loop without aborting.
-- Put it in `$machine_packages` unless the package only supports per-user install or is a Store ID.
+- Edit the JSON files, not the script. Look up the exact winget ID with `winget search <name>` first — IDs are case-sensitive on some sources and a wrong ID silently fails the install loop without aborting.
+- Put it in `machine_apps.json` unless the package only supports per-user install or is a Store ID.
