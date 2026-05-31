@@ -13,5 +13,6 @@
   "mRemoteNG.mRemoteNG",
   "pCloudAG.pCloudDrive",
   "SumatraPDF.SumatraPDF",
-  "Anthropic.ClaudeCode"
+  "Anthropic.ClaudeCode",
+  "Bitvise.SSH.Client"
 ]
