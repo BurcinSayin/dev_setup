@@ -227,12 +227,23 @@ else
 fi
 
 # nvm is a shell function, so it must be sourced here to be callable at all.
+#
+# nvm's own code is not 'set -u' clean, so nounset has to come off around these
+# calls. Specifically, 'nvm use --lts' sets NVM_LTS and takes a branch that never
+# assigns PROVIDED_VERSION, then dereferences it bare at nvm.sh:4199 --
+# 'if [ -n "${PROVIDED_VERSION}" ]', with no '-' fallback, unlike the
+# '${NVM_USE_OUTPUT-}' guard ten lines below it. Under nounset that aborts the
+# whole phase with "PROVIDED_VERSION: unbound variable" even though Node is fine.
+# 'nvm install' escapes it only because it assigns PROVIDED_VERSION itself.
+# Restore -u afterwards so our own logic keeps the protection.
+set +u
 . "$NVM_DIR/nvm.sh"
 
 echo "Installing Node ${node_version}..."
 nvm install "$node_version"
 nvm alias default 'lts/*'
 nvm use --lts
+set -u
 
 echo "Active: node $(node --version), npm $(npm --version)"
 
