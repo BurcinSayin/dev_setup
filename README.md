@@ -76,7 +76,29 @@ node --version       # current LTS
 claude --version
 ```
 
-Individual failures in either phase are reported but do not abort the run; the script prints a red summary and exits non-zero if anything failed. apt, nvm and npm are all idempotent, so re-running is safe.
+Individual failures in either phase are reported but do not abort the run; the script prints a red summary and exits non-zero if anything failed.
+
+### Re-running
+
+Every step checks before it acts, so a second run on the same machine does no package-manager work — it just reports what is already there:
+
+```
+git is already installed; skipping.
+gh is already installed; skipping.
+...
+npm package @anthropic-ai/claude-code is already installed; skipping.
+
+Done. 0 apt package(s) installed, 8 already present, 0 failures (of 8).
+```
+
+This is a *skip*, not an upgrade — re-running will not pull newer versions of things you already have. Patch those the normal way:
+
+```bash
+sudo apt-get update && sudo apt-get upgrade   # system packages
+npm update -g                                 # global CLI tools
+```
+
+Node is the exception: `nvm install --lts` is left to nvm's own check, so the script still follows the LTS line onto a new major when one promotes.
 
 ### If you run it as root
 

@@ -21,7 +21,7 @@ Run any script with no arguments to apply changes:
 
 All three self-elevate — the PowerShell scripts via `Start-Process -Verb RunAs`, the bash script via `exec sudo`. Do **not** prefix the Ubuntu script with `sudo`; it re-executes itself. The PowerShell scripts must be launched from an interactive session (a UAC prompt appears).
 
-Both package managers are idempotent, so re-running skips what is already installed.
+Re-running is safe. On Windows that is winget's own idempotence; on Ubuntu the script checks first and skips — see "Skip-if-installed" below.
 
 ## Architecture
 
@@ -55,7 +55,25 @@ After `enable_iis.ps1` runs, a full reboot is typically required before IIS is o
 
   Each entry writes its key to `/etc/apt/keyrings/<name>.asc` and its source line to `/etc/apt/sources.list.d/<name>.list`, then triggers one `apt-get update` if anything was newly added. Already-registered repos are skipped.
 
-`ubuntu_installs.sh` bootstraps `jq` and `curl` before reading the manifests — `jq` is the parser and `curl` fetches repo keys, and both are also listed in `apt_packages.json`. That is intentional, not a duplicate: apt is idempotent and the install loop simply reports them as already present.
+`ubuntu_installs.sh` bootstraps `jq` and `curl` before reading the manifests — `jq` is the parser and `curl` fetches repo keys, and both are also listed in `apt_packages.json`. That is intentional, not a duplicate: the install loop skips whatever is already installed, including anything the bootstrap step just added.
+
+### Skip-if-installed
+
+Every install step in `ubuntu_installs.sh` checks before it acts, so a re-run on a provisioned box does no package-manager work at all:
+
+| Step | Check | Log line |
+|---|---|---|
+| apt repos | keyring + `.list` both exist | `Repository <name> already registered; skipping.` |
+| apt packages | `apt_installed` → `dpkg-query -W -f='${db:Status-Status}'` equals `installed` | `<pkg> is already installed; skipping.` |
+| nvm | `$NVM_DIR/nvm.sh` is non-empty | `nvm already present at <dir>; skipping bootstrap.` |
+| Node | nvm's own idempotence | `vX.Y.Z is already installed.` |
+| npm globals | `npm ls -g --depth=0 <name>` exits 0 | `npm package <name> is already installed; skipping.` |
+
+`${db:Status-Status}` collapses dpkg's `install ok installed` triplet to a single word. Anything else — `config-files` left by a removal, an unrecognised name — falls through to the install path, which is the safe direction: a wrong manifest entry is still attempted and still lands in the red failure summary.
+
+This is a **pure skip, not an upgrade pass.** `apt-get install` and `npm install -g` used to pull a newer version in passing; now they do not run at all for anything already present. Patching is a separate act (`apt-get upgrade`, `npm update -g`, Claude Code's own auto-updater). If a step ever needs to upgrade instead of skip, that is a deliberate change to this policy, not a bug fix.
+
+Node is the one step left to nvm's own check rather than a pre-check of ours. `nvm install --lts` already prints `already installed` and skips the download, and adding our own gate would pin the box to whatever LTS line it first saw — defeating the `--lts` tracking described above.
 
 `.gitattributes` pins `*.sh` to LF. The scripts are authored on Windows; a CRLF shebang yields `bad interpreter: /usr/bin/env bash^M` on Linux.
 

@@ -65,6 +65,15 @@ read_list() {
     jq -r '.[] | strings | select(test("^[[:space:]]*$") | not)' "$1"
 }
 
+# dpkg's own view of a package. ${db:Status-Status} collapses the usual
+# "install ok installed" triplet down to just "installed"; every other state
+# (not-installed, config-files left behind by a removal, an unrecognised name)
+# falls through to the install path, which is the safe direction. dpkg-query is
+# always present, so this works before the jq/curl bootstrap below.
+apt_installed() {
+    [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = "installed" ]
+}
+
 require_file "$PACKAGE_LIST" "Package list"
 require_file "$REPO_LIST" "Repository list"
 require_file "$NPM_LIST" "npm package list"
@@ -76,10 +85,19 @@ apt-get update
 
 # jq parses the manifests and curl fetches repository signing keys, so both must
 # exist before the manifest-driven loops run. Both are also listed in
-# apt_packages.json; apt is idempotent, so the install loop simply reports them
-# as already present.
-info "Bootstrapping jq and curl (manifest parser and key fetcher)..."
-apt-get install -y --no-install-recommends jq curl
+# apt_packages.json; that is not a duplicate, because the install loop below
+# skips whatever is already installed -- including anything this step just added.
+bootstrap_missing=()
+for pkg in jq curl; do
+    apt_installed "$pkg" || bootstrap_missing+=("$pkg")
+done
+
+if [ "${#bootstrap_missing[@]}" -gt 0 ]; then
+    info "Bootstrapping ${bootstrap_missing[*]} (manifest parser and key fetcher)..."
+    apt-get install -y --no-install-recommends "${bootstrap_missing[@]}"
+else
+    info "jq and curl are already installed; skipping bootstrap."
+fi
 
 require_json_array "$PACKAGE_LIST"
 require_json_array "$REPO_LIST"
@@ -122,10 +140,16 @@ fi
 # --- Packages ----------------------------------------------------------------
 # Per-package installs, so one bad name fails loudly without aborting the rest --
 # matching the non-aborting behaviour of the winget loop in win_installs.ps1.
+#
+# Anything dpkg already reports as installed is logged and skipped outright. That
+# makes a re-run fast and honest, at the cost of no longer upgrading in passing:
+# 'apt-get install' on an outdated package used to pull the newer version. Use
+# 'apt-get upgrade' for that -- this script provisions, it does not patch.
 
 mapfile -t packages < <(read_list "$PACKAGE_LIST")
 
 installed=0
+already=0
 failed_pkgs=()
 
 if [ "${#packages[@]}" -eq 0 ]; then
@@ -133,6 +157,12 @@ if [ "${#packages[@]}" -eq 0 ]; then
 else
     ok "Starting installations..."
     for pkg in "${packages[@]}"; do
+        if apt_installed "$pkg"; then
+            info "$pkg is already installed; skipping."
+            already=$((already + 1))
+            continue
+        fi
+
         info "Installing $pkg..."
         if apt-get install -y "$pkg"; then
             installed=$((installed + 1))
@@ -206,9 +236,17 @@ nvm use --lts
 
 echo "Active: node $(node --version), npm $(npm --version)"
 
+# 'npm ls -g --depth=0 <name>' exits 0 only when the package sits in the global
+# root, and handles scoped names such as @anthropic-ai/claude-code. Its failure
+# mode is benign: any non-zero exit falls through to 'npm install -g', which is
+# exactly what this loop did unconditionally before.
 status=0
 while IFS= read -r pkg; do
     [ -n "$pkg" ] || continue
+    if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then
+        echo "npm package $pkg is already installed; skipping."
+        continue
+    fi
     echo "Installing npm package $pkg..."
     if ! npm install -g "$pkg"; then
         echo "  Failed to install npm package $pkg" >&2
@@ -230,7 +268,7 @@ fi
 echo
 if [ "${#failed_pkgs[@]}" -gt 0 ] || [ "$user_phase_failed" -ne 0 ]; then
     fail "=========================================================================="
-    fail " apt packages installed: $installed of ${#packages[@]}"
+    fail " apt packages: $installed installed, $already already present, ${#failed_pkgs[@]} failed (of ${#packages[@]})"
     if [ "${#failed_pkgs[@]}" -gt 0 ]; then
         fail " apt failures: ${failed_pkgs[*]}"
         fail " Verify names with 'apt-cache policy <name>' before editing the manifest."
@@ -242,7 +280,7 @@ if [ "${#failed_pkgs[@]}" -gt 0 ] || [ "$user_phase_failed" -ne 0 ]; then
     exit 1
 fi
 
-ok "Done. Installed $installed of ${#packages[@]} apt packages with no failures."
+ok "Done. $installed apt package(s) installed, $already already present, 0 failures (of ${#packages[@]})."
 if [ -z "$user_phase_skipped" ]; then
     ok "Open a new shell (or run 'source ~/.bashrc') to pick up nvm, node and claude."
 fi
