@@ -17,7 +17,7 @@ Run any script with no arguments to apply changes:
 |---|---|---|
 | Windows | `.\windows\win_installs.ps1` | Installs the winget packages in `machine_apps.json` + `user_apps.json` |
 | Windows | `.\windows\enable_iis.ps1` | Enables the IIS features in `iis_features.json`, installs URL Rewrite |
-| Ubuntu | `./ubuntu/ubuntu_installs.sh` | Installs the apt packages in `apt_packages.json` |
+| Ubuntu | `./ubuntu/ubuntu_installs.sh` | Installs the apt packages in `apt_packages.json`, then nvm + current Node LTS + the npm globals in `npm_packages.json` for the invoking user |
 
 All three self-elevate — the PowerShell scripts via `Start-Process -Verb RunAs`, the bash script via `exec sudo`. Do **not** prefix the Ubuntu script with `sudo`; it re-executes itself. The PowerShell scripts must be launched from an interactive session (a UAC prompt appears).
 
@@ -42,6 +42,7 @@ After `enable_iis.ps1` runs, a full reboot is typically required before IIS is o
 ### Ubuntu (`ubuntu/`)
 
 - `apt_packages.json` — flat array of apt package names, same shape as the Windows manifests.
+- `npm_packages.json` — flat array of npm packages installed globally **for the invoking user**, not root. See the user phase below.
 - `apt_repos.json` — **the one exception to the flat-array rule.** An array of objects, shipped empty (`[]`) with its registration loop wired and idle. It exists so a future vendor repo can be added without reshaping the script:
 
   ```json
@@ -57,6 +58,39 @@ After `enable_iis.ps1` runs, a full reboot is typically required before IIS is o
 `ubuntu_installs.sh` bootstraps `jq` and `curl` before reading the manifests — `jq` is the parser and `curl` fetches repo keys, and both are also listed in `apt_packages.json`. That is intentional, not a duplicate: apt is idempotent and the install loop simply reports them as already present.
 
 `.gitattributes` pins `*.sh` to LF. The scripts are authored on Windows; a CRLF shebang yields `bad interpreter: /usr/bin/env bash^M` on Linux.
+
+### The two-phase privilege model
+
+`ubuntu_installs.sh` runs in two phases with **different privileges**:
+
+1. **Root phase** — apt work. The script self-elevates, exactly as before.
+2. **User phase** — nvm, Node and global npm packages. These must not be owned by root, so the script drops back down with `sudo -u "$TARGET_USER" -H`.
+
+`-H` is **mandatory**. Without it `HOME` stays `/root`, and nvm installs into `/root/.nvm` while owned by the wrong user — a silent, confusing failure.
+
+The user phase is a **single heredoc**, and must stay that way. `nvm` is a shell function, not a binary; it only exists in the shell that sourced `nvm.sh`. Splitting the phase into several `sudo -u` calls would lose `nvm` between them. Values cross the boundary as positional arguments (`bash -s -- "$a" "$b"`) rather than environment variables, so a strict `sudoers` env policy cannot strip them.
+
+Target user resolution is `DEV_SETUP_USER` → `SUDO_USER`. The phase is **skipped with a warning**, never silently redirected to `/root`, when:
+
+- `SUDO_USER` is unset (the script was launched from a real root shell),
+- it resolves to `root` without an explicit `DEV_SETUP_USER` opt-in, or
+- the named user does not exist.
+
+Set `DEV_SETUP_USER=<name>` to run the phase for a specific account — including `root`, if that is genuinely wanted.
+
+### Node and Claude Code
+
+`NVM_VERSION` and `NODE_VERSION` are **script constants, not manifest entries**, following the `$urlRewriteId` precedent in `enable_iis.ps1`. nvm is pinned to a tag rather than `master` so the fetched installer is deterministic; keep it at `v0.40.5` or later, which carries the fix for CVE-2026-10796.
+
+`NODE_VERSION='--lts'` resolves the current LTS at install time rather than hardcoding a major — Node 24 "Krypton" today, Node 26 automatically once it promotes in October 2026. Set a major like `'22'` to pin instead.
+
+`nodejs` and `npm` are **deliberately absent from `apt_packages.json`.** Installing them would put a second Node on `PATH` competing with nvm's. Node and npm come from nvm alone.
+
+Claude Code installs via `npm install -g` inside the user phase. It does not use Node at runtime — the npm package just delivers a native binary, and it bundles its own ripgrep. `ripgrep` is in the apt list as insurance (so `USE_BUILTIN_RIPGREP=0` is available) rather than as a hard requirement.
+
+One consequence worth knowing: nvm's Node lives only in **interactive shells**, because it is sourced from `~/.bashrc`. Root, `cron`, and `systemd` units will not see `node`. If a service ever needs Node, that requires a system-wide install (a NodeSource `apt_repos.json` entry), not nvm.
+
+Anthropic also publishes a signed apt repo for Claude Code (`downloads.claude.ai/claude-code/apt/stable`, key fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`). It was evaluated and not chosen — npm-under-nvm was preferred — but it is the obvious `apt_repos.json` entry if the npm route is ever dropped.
 
 ## Platform boundaries
 
@@ -81,3 +115,14 @@ Pinned to **24.04 LTS or newer**. All current packages come from the default rep
 - Put winget IDs in `machine_apps.json` unless the package only supports per-user install or is a Store ID.
 - Look up DISM feature names with `Get-WindowsOptionalFeature -Online | Where-Object FeatureName -like 'IIS-*'` before adding to `iis_features.json`.
 - Prefer a default-repo apt package over an `apt_repos.json` entry. Adding a vendor repo is a real maintenance cost and should be justified.
+- **npm globals:** add to `npm_packages.json` only what genuinely belongs in the user's global scope — CLI tools, not project dependencies. Check the name with `npm view <name> version` first. These install under nvm's prefix as the invoking user; never add a step that runs `npm install -g` under sudo.
+
+## Install sources
+
+Ubuntu draws from three lanes, in order of preference:
+
+1. **apt** — the default for anything system-wide, from Ubuntu's own repos where possible.
+2. **npm globals under nvm** — user-scoped CLI tools, via `npm_packages.json`.
+3. **A single sanctioned `curl | bash`** — the nvm bootstrap, and nothing else.
+
+That third lane is a deliberate, narrow exception. nvm publishes no apt package, so there is no alternative. It is pinned to a version tag rather than `master` to keep the fetched script deterministic. Do not widen this lane to other tools without a comparable justification: prefer apt, then a vendor apt repo via `apt_repos.json`, and treat piping a remote script to a shell as the last resort.

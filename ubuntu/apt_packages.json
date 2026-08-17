@@ -4,5 +4,7 @@
   "curl",
   "wget",
   "jq",
-  "7zip"
+  "7zip",
+  "ca-certificates",
+  "ripgrep"
 ]

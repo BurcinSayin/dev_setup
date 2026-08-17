@@ -16,6 +16,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 PACKAGE_LIST="$SCRIPT_DIR/apt_packages.json"
 REPO_LIST="$SCRIPT_DIR/apt_repos.json"
+NPM_LIST="$SCRIPT_DIR/npm_packages.json"
+
+# Single-purpose identifiers live in the script rather than a manifest, mirroring
+# $urlRewriteId in enable_iis.ps1. nvm is pinned to a tag rather than master so
+# the fetched installer is deterministic; v0.40.5+ also carries the fix for
+# CVE-2026-10796.
+NVM_VERSION='v0.40.6'
+
+# '--lts' tracks whatever the current Node LTS is -- Node 24 "Krypton" today,
+# Node 26 automatically once it promotes in Oct 2026. Set a major like '22' to
+# pin instead.
+NODE_VERSION='--lts'
 
 GREEN=$'\033[32m'
 CYAN=$'\033[36m'
@@ -46,8 +58,16 @@ require_json_array() {
     fi
 }
 
+# Emit the entries of a flat JSON string array, skipping blank/whitespace-only
+# items -- the bash analogue of Read-PackageList's Where-Object filter. A POSIX
+# class is used rather than \s so no backslash has to survive the shell/jq layers.
+read_list() {
+    jq -r '.[] | strings | select(test("^[[:space:]]*$") | not)' "$1"
+}
+
 require_file "$PACKAGE_LIST" "Package list"
 require_file "$REPO_LIST" "Repository list"
+require_file "$NPM_LIST" "npm package list"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -63,6 +83,7 @@ apt-get install -y --no-install-recommends jq curl
 
 require_json_array "$PACKAGE_LIST"
 require_json_array "$REPO_LIST"
+require_json_array "$NPM_LIST"
 
 # --- Third-party apt repositories -------------------------------------------
 # apt_repos.json ships empty. Each entry is an object:
@@ -102,37 +123,126 @@ fi
 # Per-package installs, so one bad name fails loudly without aborting the rest --
 # matching the non-aborting behaviour of the winget loop in win_installs.ps1.
 
-# POSIX class rather than \s: no backslash escaping to survive shell/jq layers.
-mapfile -t packages < <(jq -r '.[] | strings | select(test("^[[:space:]]*$") | not)' "$PACKAGE_LIST")
-
-if [ "${#packages[@]}" -eq 0 ]; then
-    warn "No packages listed in $PACKAGE_LIST. Nothing to do."
-    exit 0
-fi
-
-ok "Starting installations..."
+mapfile -t packages < <(read_list "$PACKAGE_LIST")
 
 installed=0
 failed_pkgs=()
 
-for pkg in "${packages[@]}"; do
-    info "Installing $pkg..."
-    if apt-get install -y "$pkg"; then
-        installed=$((installed + 1))
-    else
-        fail "  Failed to install $pkg"
-        failed_pkgs+=("$pkg")
-    fi
-done
+if [ "${#packages[@]}" -eq 0 ]; then
+    warn "No packages listed in $PACKAGE_LIST; skipping the apt phase."
+else
+    ok "Starting installations..."
+    for pkg in "${packages[@]}"; do
+        info "Installing $pkg..."
+        if apt-get install -y "$pkg"; then
+            installed=$((installed + 1))
+        else
+            fail "  Failed to install $pkg"
+            failed_pkgs+=("$pkg")
+        fi
+    done
+fi
+
+# --- User phase: nvm, Node LTS, global npm packages --------------------------
+# nvm lives in $HOME/.nvm as a shell function, and the Claude Code docs warn
+# explicitly against `sudo npm install -g`, so this phase drops back down to the
+# invoking user. It has to be a single heredoc: nvm is a function rather than a
+# binary, so it exists only inside the shell that sourced it.
+
+TARGET_USER="${DEV_SETUP_USER:-${SUDO_USER:-}}"
+user_phase_skipped=""
+user_phase_failed=0
+
+if [ -z "$TARGET_USER" ]; then
+    user_phase_skipped="SUDO_USER is unset, so this ran as real root"
+elif [ "$TARGET_USER" = "root" ] && [ -z "${DEV_SETUP_USER:-}" ]; then
+    user_phase_skipped="the invoking user resolved to root"
+elif ! id "$TARGET_USER" >/dev/null 2>&1; then
+    user_phase_skipped="user '$TARGET_USER' does not exist"
+fi
 
 echo
-if [ "${#failed_pkgs[@]}" -gt 0 ]; then
+if [ -n "$user_phase_skipped" ]; then
+    warn "=========================================================================="
+    warn " Skipping nvm / Node / npm: $user_phase_skipped."
+    warn " Installing them under /root would leave them unusable from your account."
+    warn " Re-run this script as your normal user, or set DEV_SETUP_USER=<name>."
+    warn "=========================================================================="
+else
+    mapfile -t npm_packages < <(read_list "$NPM_LIST")
+    npm_list_text=""
+    if [ "${#npm_packages[@]}" -gt 0 ]; then
+        npm_list_text="$(printf '%s\n' "${npm_packages[@]}")"
+    fi
+
+    ok "Setting up nvm, Node ($NODE_VERSION) and npm globals for user '$TARGET_USER'..."
+
+    # -H is mandatory: without it HOME stays /root and nvm installs to the wrong
+    # place. Values cross as positional args rather than environment variables so
+    # that a strict sudoers env policy cannot strip them.
+    if sudo -u "$TARGET_USER" -H bash -s -- \
+            "$NVM_VERSION" "$NODE_VERSION" "$npm_list_text" <<'USERPHASE'
+set -euo pipefail
+nvm_version="$1"
+node_version="$2"
+npm_packages="$3"
+
+export NVM_DIR="$HOME/.nvm"
+
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+    echo "nvm already present at $NVM_DIR; skipping bootstrap."
+else
+    echo "Installing nvm $nvm_version into $NVM_DIR..."
+    curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${nvm_version}/install.sh" | bash
+fi
+
+# nvm is a shell function, so it must be sourced here to be callable at all.
+. "$NVM_DIR/nvm.sh"
+
+echo "Installing Node ${node_version}..."
+nvm install "$node_version"
+nvm alias default 'lts/*'
+nvm use --lts
+
+echo "Active: node $(node --version), npm $(npm --version)"
+
+status=0
+while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    echo "Installing npm package $pkg..."
+    if ! npm install -g "$pkg"; then
+        echo "  Failed to install npm package $pkg" >&2
+        status=1
+    fi
+done <<<"$npm_packages"
+exit "$status"
+USERPHASE
+    then
+        ok "nvm, Node and npm globals are set up for '$TARGET_USER'."
+    else
+        fail "  The nvm / Node / npm phase reported a failure."
+        user_phase_failed=1
+    fi
+fi
+
+# --- Summary -----------------------------------------------------------------
+
+echo
+if [ "${#failed_pkgs[@]}" -gt 0 ] || [ "$user_phase_failed" -ne 0 ]; then
     fail "=========================================================================="
-    fail " Installed: $installed of ${#packages[@]}"
-    fail " Failed:    ${failed_pkgs[*]}"
-    fail " Verify names with 'apt-cache policy <name>' before editing the manifest."
+    fail " apt packages installed: $installed of ${#packages[@]}"
+    if [ "${#failed_pkgs[@]}" -gt 0 ]; then
+        fail " apt failures: ${failed_pkgs[*]}"
+        fail " Verify names with 'apt-cache policy <name>' before editing the manifest."
+    fi
+    if [ "$user_phase_failed" -ne 0 ]; then
+        fail " nvm / Node / npm phase failed -- see the output above."
+    fi
     fail "=========================================================================="
     exit 1
 fi
 
-ok "Done. Installed $installed of ${#packages[@]} packages with no failures."
+ok "Done. Installed $installed of ${#packages[@]} apt packages with no failures."
+if [ -z "$user_phase_skipped" ]; then
+    ok "Open a new shell (or run 'source ~/.bashrc') to pick up nvm, node and claude."
+fi

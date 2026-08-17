@@ -10,9 +10,10 @@ dev_setup/
 │   ├── machine_apps.json
 │   ├── user_apps.json
 │   └── iis_features.json
-└── ubuntu/           Ubuntu 24.04 LTS+ — bash + apt
+└── ubuntu/           Ubuntu 24.04 LTS+ — bash + apt + nvm
     ├── ubuntu_installs.sh
     ├── apt_packages.json
+    ├── npm_packages.json
     └── apt_repos.json
 ```
 
@@ -47,18 +48,49 @@ winget is idempotent, so re-running is safe and skips what is already installed.
 
 The script re-executes itself under `sudo`, mirroring how the Windows scripts self-elevate. You will be prompted for your password once.
 
-Installs the minimal shared CLI core:
+It runs in two phases. **System packages** install as root via apt:
 
 | Package | Binary | Notes |
 |---|---|---|
 | `git` | `git` | |
 | `gh` | `gh` | GitHub CLI — from `universe`, enabled by default on 24.04 |
-| `curl` | `curl` | also used to fetch repo signing keys |
+| `curl` | `curl` | also bootstraps nvm and fetches repo signing keys |
 | `wget` | `wget` | |
-| `jq` | `jq` | also used to parse these manifests |
+| `jq` | `jq` | also parses these manifests |
 | `7zip` | `7zz` | on 22.04 and earlier this package is `p7zip-full` |
+| `ca-certificates` | — | TLS trust for the nvm and npm downloads |
+| `ripgrep` | `rg` | optional; Claude Code bundles its own, this is a fallback |
 
-Individual package failures are reported but do not abort the run; the script prints a red summary and exits non-zero if anything failed. apt is idempotent, so re-running is safe.
+Then the **user toolchain** installs as *you*, never as root:
+
+| Tool | Source | Notes |
+|---|---|---|
+| nvm | `v0.40.6` install script | into `~/.nvm` |
+| node + npm | `nvm install --lts` | current LTS, resolved at install time — not a pinned major |
+| `claude` | `npm install -g` from `npm_packages.json` | Claude Code |
+
+After it finishes, open a new shell (or `source ~/.bashrc`) so nvm is on your `PATH`:
+
+```bash
+node --version       # current LTS
+claude --version
+```
+
+Individual failures in either phase are reported but do not abort the run; the script prints a red summary and exits non-zero if anything failed. apt, nvm and npm are all idempotent, so re-running is safe.
+
+### If you run it as root
+
+nvm and npm globals are per-user by design, so the script refuses to install them into `/root` by accident. If `SUDO_USER` is unset — you launched from a real root shell — it warns and skips that phase rather than putting an unusable toolchain in root's home.
+
+Run it as your normal user, or name the account explicitly:
+
+```bash
+DEV_SETUP_USER=alice ./ubuntu/ubuntu_installs.sh
+```
+
+### Where nvm's node is visible
+
+nvm is sourced from `~/.bashrc`, so `node` and `npm` exist in **interactive shells only**. `cron`, `systemd` units, and root will not find them. If a service ever needs Node, install it system-wide via an `apt_repos.json` entry (NodeSource) — nvm is not the right tool for that.
 
 ### Adding a third-party apt repo
 
@@ -80,7 +112,9 @@ Prefer a default-repo package where one exists — a vendor repo is real mainten
 
 ## Scope notes
 
-**Ubuntu is not a mirror of Windows.** It gets a deliberately minimal CLI core. GUI apps (Postman, JetBrains Toolbox, Dropbox, pCloud, Antigravity IDE) and Windows-only apps (Notepad++, SumatraPDF, mRemoteNG, Bitvise SSH Client) are out of scope, as are tools with no official apt repo (Volta, AWS CLI v2).
+**Ubuntu is not a mirror of Windows.** It gets a deliberately minimal CLI core plus a Node toolchain. GUI apps (Postman, JetBrains Toolbox, Dropbox, pCloud, Antigravity IDE) and Windows-only apps (Notepad++, SumatraPDF, mRemoteNG, Bitvise SSH Client) are out of scope, as is AWS CLI v2 (no official apt repo).
+
+**The two machines manage Node differently.** Windows uses Volta; Ubuntu uses nvm. A deliberate divergence, but worth knowing before you expect `volta` on the Linux box.
 
 **There is no Ubuntu equivalent of `enable_iis.ps1`, by design.** It provisions IIS for ASP.NET 4.8, which is .NET Framework and does not run on Linux at all. Linux hosting for modern .NET is deferred rather than cancelled — when wanted, it attaches as a new `ubuntu/` script using `apt_repos.json` to register the Microsoft package repo, with no restructuring needed.
 
@@ -89,8 +123,11 @@ Prefer a default-repo package where one exists — a vendor repo is real mainten
 Verify the identifier before adding it — a wrong name fails without aborting the run on either OS.
 
 ```powershell
-winget search <name>          # Windows
+winget search <name>          # Windows  -> machine_apps.json / user_apps.json
 ```
 ```bash
-apt-cache policy <name>       # Ubuntu
+apt-cache policy <name>       # Ubuntu   -> apt_packages.json
+npm view <name> version       # Ubuntu   -> npm_packages.json
 ```
+
+Put system packages in `apt_packages.json` and user-scoped CLI tools in `npm_packages.json`. Note that `nodejs` and `npm` are intentionally **not** apt packages here — installing them would put a second Node on `PATH` fighting with nvm's.
