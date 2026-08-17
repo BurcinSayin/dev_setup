@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_LIST="$SCRIPT_DIR/apt_packages.json"
 REPO_LIST="$SCRIPT_DIR/apt_repos.json"
 NPM_LIST="$SCRIPT_DIR/npm_packages.json"
+VENDOR_LIST="$SCRIPT_DIR/vendor_scripts.json"
 
 # Single-purpose identifiers live in the script rather than a manifest, mirroring
 # $urlRewriteId in enable_iis.ps1. nvm is pinned to a tag rather than master so
@@ -28,6 +29,12 @@ NVM_VERSION='v0.40.6'
 # Node 26 automatically once it promotes in Oct 2026. Set a major like '22' to
 # pin instead.
 NODE_VERSION='--lts'
+
+# Everything else that installs from a vendor script -- uv, bun -- lives in
+# vendor_scripts.json rather than in constants here, so tools can be added or
+# dropped by editing JSON. nvm stays hardcoded above because it is not that
+# shape: it is a shell function the rest of the user phase has to source and
+# then call, not a self-contained binary that can be installed and forgotten.
 
 GREEN=$'\033[32m'
 CYAN=$'\033[36m'
@@ -77,6 +84,7 @@ apt_installed() {
 require_file "$PACKAGE_LIST" "Package list"
 require_file "$REPO_LIST" "Repository list"
 require_file "$NPM_LIST" "npm package list"
+require_file "$VENDOR_LIST" "Vendor script list"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -102,6 +110,7 @@ fi
 require_json_array "$PACKAGE_LIST"
 require_json_array "$REPO_LIST"
 require_json_array "$NPM_LIST"
+require_json_array "$VENDOR_LIST"
 
 # --- Third-party apt repositories -------------------------------------------
 # apt_repos.json ships empty. Each entry is an object:
@@ -173,7 +182,7 @@ else
     done
 fi
 
-# --- User phase: nvm, Node LTS, global npm packages --------------------------
+# --- User phase: nvm, Node LTS, npm globals, vendor scripts ------------------
 # nvm lives in $HOME/.nvm as a shell function, and the Claude Code docs warn
 # explicitly against `sudo npm install -g`, so this phase drops back down to the
 # invoking user. It has to be a single heredoc: nvm is a function rather than a
@@ -205,17 +214,21 @@ else
         npm_list_text="$(printf '%s\n' "${npm_packages[@]}")"
     fi
 
-    ok "Setting up nvm, Node ($NODE_VERSION) and npm globals for user '$TARGET_USER'..."
+    ok "Setting up nvm, Node ($NODE_VERSION), npm globals and vendor tools for user '$TARGET_USER'..."
 
     # -H is mandatory: without it HOME stays /root and nvm installs to the wrong
     # place. Values cross as positional args rather than environment variables so
-    # that a strict sudoers env policy cannot strip them.
+    # that a strict sudoers env policy cannot strip them. The vendor manifest
+    # crosses as its raw JSON text and is parsed with jq on the far side, which
+    # keeps per-entry fields (notably 'args') intact -- a flattened TSV would
+    # lose the boundary between arguments.
     if sudo -u "$TARGET_USER" -H bash -s -- \
-            "$NVM_VERSION" "$NODE_VERSION" "$npm_list_text" <<'USERPHASE'
+            "$NVM_VERSION" "$NODE_VERSION" "$npm_list_text" "$(cat "$VENDOR_LIST")" <<'USERPHASE'
 set -euo pipefail
 nvm_version="$1"
 node_version="$2"
 npm_packages="$3"
+vendor_json="$4"
 
 export NVM_DIR="$HOME/.nvm"
 
@@ -264,12 +277,84 @@ while IFS= read -r pkg; do
         status=1
     fi
 done <<<"$npm_packages"
+
+# --- Vendor install scripts --------------------------------------------------
+# Driven by vendor_scripts.json. Each entry is a standalone installer that drops
+# a self-contained binary somewhere under $HOME, so none of this needs root and
+# none of it needs Node. Fields:
+#
+#   name           label used in the log lines (required)
+#   url            https installer URL, piped to the shell below (required)
+#   shell          'bash' or 'sh' -- whichever the vendor documents
+#   check_command  binary name to look for on PATH
+#   check_path     path to the binary, relative to $HOME
+#   args           positional arguments for the installer, e.g. a version tag
+#
+# Both checks are needed. This is a non-interactive shell, so a freshly added
+# ~/.local/bin or ~/.bun/bin may not be on PATH yet and 'command -v' alone would
+# reinstall on every run; check_path covers that. It is relative to $HOME so the
+# manifest never has to carry a shell variable that would need expanding here.
+#
+# Pinning is per-vendor and lives in the manifest: uv takes a version in its URL
+# (https://astral.sh/uv/0.12.5/install.sh), bun takes one as an argument
+# (["bun-v1.2.0"]). Left as shipped, both resolve the current release at install
+# time. As everywhere else this is a skip, not an upgrade -- an already-present
+# tool is left alone, and updating it is its own deliberate act.
+
+vendor_count=$(jq 'length' <<<"$vendor_json")
+vendor_index=0
+while [ "$vendor_index" -lt "$vendor_count" ]; do
+    entry=$(jq -c ".[$vendor_index]" <<<"$vendor_json")
+    vendor_index=$((vendor_index + 1))
+
+    v_name=$(jq -r '.name // ""' <<<"$entry")
+    v_url=$(jq -r '.url // ""' <<<"$entry")
+    v_shell=$(jq -r '.shell // "bash"' <<<"$entry")
+    v_command=$(jq -r '.check_command // ""' <<<"$entry")
+    v_path=$(jq -r '.check_path // ""' <<<"$entry")
+    mapfile -t v_args < <(jq -r '.args // [] | .[] | strings' <<<"$entry")
+
+    if [ -z "$v_name" ] || [ -z "$v_url" ]; then
+        echo "  Skipping malformed vendor entry: 'name' and 'url' are both required" >&2
+        status=1
+        continue
+    fi
+
+    # These two guards are the point of validating a manifest whose whole purpose
+    # is to execute remote code: plain http would make the payload trivially
+    # tamperable, and the interpreter is not a free-text field.
+    case "$v_url" in
+        https://*) ;;
+        *)  echo "  Refusing to run the $v_name installer: url is not https ($v_url)" >&2
+            status=1
+            continue ;;
+    esac
+    case "$v_shell" in
+        bash|sh) ;;
+        *)  echo "  Refusing to run the $v_name installer: shell must be bash or sh, got '$v_shell'" >&2
+            status=1
+            continue ;;
+    esac
+
+    if { [ -n "$v_command" ] && command -v "$v_command" >/dev/null 2>&1; } ||
+       { [ -n "$v_path" ] && [ -x "$HOME/$v_path" ]; }; then
+        echo "$v_name is already installed; skipping."
+        continue
+    fi
+
+    echo "Installing $v_name from $v_url..."
+    if ! curl -fsSL "$v_url" | "$v_shell" -s -- ${v_args[@]+"${v_args[@]}"}; then
+        echo "  Failed to install $v_name" >&2
+        status=1
+    fi
+done
+
 exit "$status"
 USERPHASE
     then
-        ok "nvm, Node and npm globals are set up for '$TARGET_USER'."
+        ok "nvm, Node, npm globals and vendor tools are set up for '$TARGET_USER'."
     else
-        fail "  The nvm / Node / npm phase reported a failure."
+        fail "  The nvm / Node / npm / vendor phase reported a failure."
         user_phase_failed=1
     fi
 fi
@@ -285,7 +370,7 @@ if [ "${#failed_pkgs[@]}" -gt 0 ] || [ "$user_phase_failed" -ne 0 ]; then
         fail " Verify names with 'apt-cache policy <name>' before editing the manifest."
     fi
     if [ "$user_phase_failed" -ne 0 ]; then
-        fail " nvm / Node / npm phase failed -- see the output above."
+        fail " nvm / Node / npm / vendor phase failed -- see the output above."
     fi
     fail "=========================================================================="
     exit 1
@@ -293,5 +378,5 @@ fi
 
 ok "Done. $installed apt package(s) installed, $already already present, 0 failures (of ${#packages[@]})."
 if [ -z "$user_phase_skipped" ]; then
-    ok "Open a new shell (or run 'source ~/.bashrc') to pick up nvm, node and claude."
+    ok "Open a new shell (or run 'source ~/.bashrc') to pick up nvm, node, claude and the vendor tools."
 fi

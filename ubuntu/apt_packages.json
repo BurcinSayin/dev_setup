@@ -6,5 +6,7 @@
   "jq",
   "7zip",
   "ca-certificates",
-  "ripgrep"
+  "ripgrep",
+  "ruby-full",
+  "unzip"
 ]
