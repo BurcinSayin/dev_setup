@@ -14,5 +14,6 @@
   "pCloudAG.pCloudDrive",
   "SumatraPDF.SumatraPDF",
   "Bitvise.SSH.Client",
-  "OpenVPNTechnologies.OpenVPNConnect"
+  "OpenVPNTechnologies.OpenVPNConnect",
+  "BurntSushi.ripgrep.MSVC"
 ]
