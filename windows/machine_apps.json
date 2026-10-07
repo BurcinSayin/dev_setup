@@ -15,5 +15,6 @@
   "SumatraPDF.SumatraPDF",
   "Bitvise.SSH.Client",
   "OpenVPNTechnologies.OpenVPNConnect",
-  "BurntSushi.ripgrep.MSVC"
+  "BurntSushi.ripgrep.MSVC",
+  "Docker.DockerDesktop"
 ]
