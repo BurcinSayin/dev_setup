@@ -16,5 +16,6 @@
   "Bitvise.SSH.Client",
   "OpenVPNTechnologies.OpenVPNConnect",
   "BurntSushi.ripgrep.MSVC",
-  "Docker.DockerDesktop"
+  "Docker.DockerDesktop",
+  "Microsoft.DotNet.SDK.10"
 ]
