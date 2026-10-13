@@ -8,5 +8,6 @@
   "ca-certificates",
   "ripgrep",
   "ruby-full",
-  "unzip"
+  "unzip",
+  "awscli"
 ]
