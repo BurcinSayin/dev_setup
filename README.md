@@ -163,6 +163,28 @@ This is the last-resort lane: prefer an apt package, then an apt repo below.
 
 Prefer a default-repo package where one exists — a vendor repo is real maintenance cost.
 
+### Decrypting mRemoteNG connections
+
+With `uv` on PATH, run:
+
+```bash
+./ubuntu/nremote_decrypt/decrypt_confcons.sh
+```
+
+This standalone wrapper uses `uv run --with pycryptodomex` to decrypt
+`/run/media/orin/New Volume/tmp/mRemoteNG/confCons.xml`. It works from any working
+directory and forwards extra arguments to the Python CLI (`--help`, or
+`--password '<master-password>'` for a custom password; the default is `mR3m`).
+Credentials print to stdout; protect output and avoid putting real passwords in
+shell history. The existing Python XML mode exits with status 1 even after
+successful processing; the wrapper preserves that status.
+
+Each XML credential entry includes its complete root-to-connection name path,
+for example `Path: Connections>Company>Production>Database`, followed by the
+existing username, hostname, and password fields. Names come from XML `Name`
+attributes; an unnamed root displays `root`, and other unnamed nodes display
+`(unnamed)`.
+
 ---
 
 ## Scope notes
