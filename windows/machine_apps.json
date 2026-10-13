@@ -17,5 +17,6 @@
   "OpenVPNTechnologies.OpenVPNConnect",
   "BurntSushi.ripgrep.MSVC",
   "Docker.DockerDesktop",
-  "Microsoft.DotNet.SDK.10"
+  "Microsoft.DotNet.SDK.10",
+  "Microsoft.SQLServerManagementStudio"
 ]
